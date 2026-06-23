@@ -209,7 +209,8 @@ def estimate_cost(
     )
 
     monthly_page_views = profile.traffic.sessions_per_day * 30
-    estimated_cdn_gb = (monthly_page_views * DEFAULT_AVG_PAGE_WEIGHT_MB) / 1024
+    avg_page_weight_mb = profile.measured_avg_page_weight_mb or DEFAULT_AVG_PAGE_WEIGHT_MB
+    estimated_cdn_gb = (monthly_page_views * avg_page_weight_mb) / 1024
     cache_hit_ratio = decision.cache_hit_ratio_used
     # CloudFront serves cache hits from edge; only the cache-miss fraction plus a
     # smaller steady trickle of edge-to-viewer transfer for hits is being approximated
@@ -222,9 +223,10 @@ def estimate_cost(
             monthly_usd=round(cloudfront_monthly, 2),
             basis=(
                 f"estimated from {profile.traffic.sessions_per_day:,} sessions/day x "
-                f"{DEFAULT_AVG_PAGE_WEIGHT_MB} MB/page assumption ({billable_gb/1024:.1f} TB "
-                f"billable/month); not measured; uses AWS's actual tiered per-GB pricing, "
-                f"not a flat rate, since the difference is large at this volume"
+                f"{avg_page_weight_mb:.2f} MB/page "
+                f"({'measured from sampled pages' if profile.measured_avg_page_weight_mb else 'default assumption, not measured'}) "
+                f"({billable_gb/1024:.1f} TB billable/month); uses AWS's actual tiered "
+                f"per-GB pricing, not a flat rate, since the difference is large at this volume"
             ),
         )
     )

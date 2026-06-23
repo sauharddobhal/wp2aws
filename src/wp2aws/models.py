@@ -50,6 +50,7 @@ class SiteProfile:
 
     database_size_mb: float | None = None
     media_library_size_mb: float | None = None
+    measured_avg_page_weight_mb: float | None = None
 
     existing_cache_headers_present: bool = False
 

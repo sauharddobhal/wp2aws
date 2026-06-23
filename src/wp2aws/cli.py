@@ -53,22 +53,27 @@ def _run_pipeline(profile: SiteProfile, aws_region: str, use_live_pricing: bool)
     return decision, cost
 
 
-def _output(profile, decision, cost, export_tfvars, export_report, aws_region):
-    print(render_text_report(profile, decision, cost))
+def _output(profile, decision, cost, export_tfvars, export_report, aws_region, current_hosting_cost_usd=None):
+    print(render_text_report(profile, decision, cost, current_hosting_cost_usd))
 
     if export_tfvars:
         Path(export_tfvars).write_text(render_tfvars(decision, profile, aws_region), encoding="utf-8")
         print(f"\nWrote {export_tfvars}")
 
     if export_report:
-        Path(export_report).write_text(render_markdown_report(profile, decision, cost), encoding="utf-8")
+        Path(export_report).write_text(
+            render_markdown_report(profile, decision, cost, current_hosting_cost_usd), encoding="utf-8"
+        )
         print(f"Wrote {export_report}")
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
     profile = _load_demo_profile()
     decision, cost = _run_pipeline(profile, args.aws_region, args.live_pricing)
-    _output(profile, decision, cost, args.export_tfvars, args.export_report, args.aws_region)
+    _output(
+        profile, decision, cost, args.export_tfvars, args.export_report, args.aws_region,
+        current_hosting_cost_usd=args.current_hosting_cost,
+    )
     return 0
 
 
@@ -101,7 +106,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return 1
 
     decision, cost = _run_pipeline(profile, args.aws_region, args.live_pricing)
-    _output(profile, decision, cost, args.export_tfvars, args.export_report, args.aws_region)
+    _output(
+        profile, decision, cost, args.export_tfvars, args.export_report, args.aws_region,
+        current_hosting_cost_usd=args.current_hosting_cost,
+    )
     return 0
 
 
@@ -114,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo_parser.add_argument("--live-pricing", action="store_true")
     demo_parser.add_argument("--export-tfvars", default=None)
     demo_parser.add_argument("--export-report", default=None)
+    demo_parser.add_argument("--current-hosting-cost", type=float, default=None, help="Current monthly hosting cost in USD, for a savings comparison.")
     demo_parser.set_defaults(func=cmd_demo)
 
     scan_parser = subparsers.add_parser("scan", help="Scan a real site, remotely or locally.")
@@ -125,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--live-pricing", action="store_true")
     scan_parser.add_argument("--export-tfvars", default=None)
     scan_parser.add_argument("--export-report", default=None)
+    scan_parser.add_argument("--current-hosting-cost", type=float, default=None, help="Current monthly hosting cost in USD, for a savings comparison.")
     scan_parser.set_defaults(func=cmd_scan)
 
     return parser

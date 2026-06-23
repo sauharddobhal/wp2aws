@@ -35,10 +35,22 @@ of papering over it:
 | Traffic (sessions/day, peak ratio) | User-provided input | Measured from access logs |
 | Plugins/themes | Detected from public asset paths (misses backend-only plugins) | Exact list via WP-CLI |
 | WooCommerce / membership detection | Heuristic, from detected plugin slugs | Definitive, from full plugin list |
+| Page weight (drives the CloudFront cost line) | Measured from sampled pages (homepage + one post, HTML + linked assets via HEAD requests) | Not yet measured locally; falls back to the same default as an unconfigured remote scan |
 | Database size | Not available | Measured via WP-CLI |
 | Media library size | Not available | Measured directly |
 | Server specs (CPU/RAM/disk) | Not available | Measured directly |
 | Current cache behavior | Inferred from response headers | Inferred from response headers + config |
+
+### Other report features
+
+- **Data quality score**: every report leads with how many inputs were actually measured
+  versus assumed (e.g. "4/6 inputs measured"), so the honesty distinction this tool is
+  built around is visible at a glance, not just buried in per-line basis text.
+- **Hosting cost comparison**: pass `--current-hosting-cost <monthly USD>` to see the AWS
+  estimate stacked against what you're paying now, with the difference and a percentage
+  change. This compares sticker price only, it does not account for migration engineering
+  time or capability differences (autoscaling, managed failover) your current host may
+  or may not offer.
 
 ## Architecture
 
@@ -68,8 +80,9 @@ flowchart TD
 
 - **Remote mode is read-only and respects `robots.txt`.** It checks `robots.txt` before
   making any request beyond that, identifies itself with a clear User-Agent
-  (`wp2aws-scanner/<version>`), and only ever issues GET requests. Only scan sites you
-  own or have explicit permission to scan.
+  (`wp2aws-scanner/<version>`), and only ever issues GET and HEAD requests (HEAD is used
+  to measure linked asset sizes for the page-weight estimate without downloading their
+  bodies). Only scan sites you own or have explicit permission to scan.
 - **Local mode never reads or outputs secrets.** `wp-config.php` parsing uses a strict
   allowlist of constant names (`WP_CACHE`, `WP_DEBUG`, `DISABLE_WP_CRON`,
   `WP_MEMORY_LIMIT`, `WP_MAX_MEMORY_LIMIT`). `DB_PASSWORD`, `DB_USER`, all auth
@@ -140,7 +153,8 @@ python -m wp2aws scan --local --access-log /var/log/nginx/access.log
 
 ```bash
 python -m wp2aws scan https://example.com --sessions-per-day 50000 \
-  --export-tfvars terraform.tfvars --export-report report.md
+  --export-tfvars terraform.tfvars --export-report report.md \
+  --current-hosting-cost 200
 ```
 
 `terraform.tfvars` can be copied directly into
