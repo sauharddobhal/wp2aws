@@ -1,0 +1,17 @@
+{
+  "source_url": "https://demo.example.com (synthetic, not a real site)",
+  "sessions_per_day": 5000000,
+  "peak_to_average_ratio": 5.0,
+  "content_profile": "content",
+  "plugins": ["yoast-seo", "contact-form-7", "redis-cache", "wordfence"],
+  "post_count": 4280,
+  "page_count": 35,
+  "database_size_mb": 8200,
+  "media_library_size_mb": 42000,
+  "server_cpu_cores": 4,
+  "server_ram_mb": 16384,
+  "server_disk_gb": 200,
+  "notes": [
+    "This is synthetic demo data, not a real scan. Run 'wp2aws scan <url>' or 'wp2aws scan --local' against a real site for an actual result."
+  ]
+}

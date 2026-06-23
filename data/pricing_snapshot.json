@@ -1,0 +1,33 @@
+{
+  "snapshot_date": "2026-06-01",
+  "region": "us-east-1",
+  "disclaimer": "Approximate on-demand pricing as of the snapshot date above. AWS pricing changes over time and varies by region, commitment type (Reserved/Savings Plans), and account-specific discounts. Treat this as directional, not a quote. Use --live-pricing for current public pricing.",
+  "ec2_hourly_usd": {
+    "t4g.medium": 0.0336,
+    "t4g.large": 0.0672,
+    "m6g.large": 0.077,
+    "m6g.xlarge": 0.154
+  },
+  "aurora_instance_hourly_usd": {
+    "db.r6g.large": 0.26,
+    "db.r6g.xlarge": 0.52
+  },
+  "aurora_storage_per_gb_month_usd": 0.10,
+  "elasticache_hourly_usd": {
+    "cache.r6g.large": 0.151,
+    "cache.r6g.xlarge": 0.302
+  },
+  "nat_gateway_hourly_usd": 0.045,
+  "nat_gateway_per_gb_usd": 0.045,
+  "alb_hourly_usd": 0.0225,
+  "alb_per_lcu_hour_usd": 0.008,
+  "s3_standard_per_gb_month_usd": 0.023,
+  "cloudfront_tiered_pricing_usd_per_gb": [
+    {"up_to_tb": 10, "rate": 0.085},
+    {"up_to_tb": 50, "rate": 0.080},
+    {"up_to_tb": 150, "rate": 0.060},
+    {"up_to_tb": 500, "rate": 0.040},
+    {"up_to_tb": null, "rate": 0.030}
+  ],
+  "hours_per_month": 730
+}
