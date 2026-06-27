@@ -73,8 +73,10 @@ flowchart TD
 | Local scanner | `src/wp2aws/scanners/local.py` | Access-log parsing, WP-CLI calls, server specs |
 | Secrets filter | `src/wp2aws/scanners/secrets_filter.py` | Allowlist-only wp-config.php reader; see "Safety" below |
 | Sizing engine | `src/wp2aws/sizing/engine.py` | Maps a SiteProfile to an instance/cluster sizing tier |
-| Cost estimator | `src/wp2aws/sizing/cost.py` | Monthly AWS cost estimate from the sizing decision |
+| Cost estimator | `src/wp2aws/sizing/cost.py` | Monthly AWS cost estimate from the sizing decision; prefers measured page weight over the default assumption when available |
+| Data quality scorer | `src/wp2aws/sizing/quality.py` | Counts how many inputs were measured vs. assumed, surfaced at the top of every report |
 | tfvars renderer | `src/wp2aws/sizing/tfvars.py` | Emits `terraform.tfvars` matching `wordpress-high-traffic-aws`'s variable names |
+| Report renderer | `src/wp2aws/report.py` | Renders the text/Markdown report, including the data-quality line and the optional hosting-cost comparison |
 
 ## Safety
 
