@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout wp2aws
+        uses: actions/checkout@v4
+        with:
+          path: wp2aws
+
+      # Checked out as a real sibling, not just for show: the cross-repo tfvars test
+      # (tests/test_tfvars_render.py) skips gracefully without this, but with it, CI
+      # actually exercises the real compatibility check (every variable wp2aws emits
+      # is confirmed against that repo's real declared variables) on every push.
+      - name: Checkout wordpress-high-traffic-aws (sibling, for the cross-repo tfvars test)
+        uses: actions/checkout@v4
+        with:
+          repository: sauharddobhal/wordpress-high-traffic-aws
+          path: wordpress-high-traffic-aws
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install wp2aws
+        working-directory: wp2aws
+        run: pip install -e .
+
+      - name: Run tests
+        working-directory: wp2aws
+        run: python -m pytest tests/ -v
+
+      - name: Run the demo end to end
+        working-directory: wp2aws
+        run: python -m wp2aws demo
