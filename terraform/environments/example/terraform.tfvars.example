@@ -1,0 +1,17 @@
+# Copy this file to terraform.tfvars and replace every REPLACE_ME placeholder.
+# Values with sensible defaults already in variables.tf are omitted here.
+
+aws_region = "us-east-1"
+
+media_bucket_name = "REPLACE_ME-wp-media-bucket"
+
+ami_id                  = "REPLACE_ME-ami-id"
+alb_acm_certificate_arn = "arn:aws:acm:us-east-1:REPLACE_ME:certificate/REPLACE_ME"
+
+domain_aliases                 = ["www.REPLACE_ME.com"]
+cloudfront_acm_certificate_arn = "arn:aws:acm:us-east-1:REPLACE_ME:certificate/REPLACE_ME"
+
+webhook_shared_secret = "REPLACE_ME-generate-a-long-random-value"
+
+# Optional: get notified on cache-invalidation Lambda errors. Omit to skip the alarm.
+# alert_email = "REPLACE_ME@example.com"

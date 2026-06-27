@@ -1,0 +1,11 @@
+# Copy this file to backend.tf and fill in your own values.
+
+terraform {
+  backend "s3" {
+    bucket         = "REPLACE_WITH_YOUR_TERRAFORM_STATE_BUCKET"
+    key            = "wordpress-high-traffic/example/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "REPLACE_WITH_YOUR_TERRAFORM_LOCK_TABLE"
+    encrypt        = true
+  }
+}

@@ -7,37 +7,65 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  lambda-tests:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout wp2aws
-        uses: actions/checkout@v4
-        with:
-          path: wp2aws
-
-      # Checked out as a real sibling, not just for show: the cross-repo tfvars test
-      # (tests/test_tfvars_render.py) skips gracefully without this, but with it, CI
-      # actually exercises the real compatibility check (every variable wp2aws emits
-      # is confirmed against that repo's real declared variables) on every push.
-      - name: Checkout wordpress-high-traffic-aws (sibling, for the cross-repo tfvars test)
-        uses: actions/checkout@v4
-        with:
-          repository: sauharddobhal/wordpress-high-traffic-aws
-          path: wordpress-high-traffic-aws
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install wp2aws
-        working-directory: wp2aws
-        run: pip install -e .
+      - name: Install dependencies
+        working-directory: scripts/cache-invalidation-lambda
+        run: pip install -r requirements.txt
 
-      - name: Run tests
-        working-directory: wp2aws
+      - name: Run cache-invalidation Lambda tests
+        working-directory: scripts/cache-invalidation-lambda
+        env:
+          PYTHONPATH: .
         run: python -m pytest tests/ -v
 
-      - name: Run the demo end to end
-        working-directory: wp2aws
-        run: python -m wp2aws demo
+  terraform-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+      - name: terraform fmt -check (whole repo, runs once)
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        directory:
+          - terraform/modules/networking
+          - terraform/modules/security
+          - terraform/modules/storage
+          - terraform/modules/database
+          - terraform/modules/cache
+          - terraform/modules/compute
+          - terraform/modules/cdn
+          - terraform/modules/cache-invalidation
+          - terraform/environments/example
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      # -backend=false since there's no real state bucket in CI; validates HCL syntax,
+      # variable references, and provider schema usage without real AWS credentials.
+      - name: terraform init
+        working-directory: ${{ matrix.directory }}
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        working-directory: ${{ matrix.directory }}
+        run: terraform validate

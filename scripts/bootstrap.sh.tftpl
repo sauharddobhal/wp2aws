@@ -1,0 +1,143 @@
+#!/bin/bash
+# Bootstrap script for the WordPress app tier, rendered by Terraform's templatefile()
+# in modules/compute. Installs and configures Nginx, PHP-FPM, mounts EFS for
+# wp-content, and writes the wp-config.php connection settings. It does NOT deploy an
+# actual WordPress codebase or theme, that's expected to come from your own CI/CD
+# pipeline (CodeDeploy, an AMI bake step, or similar) running after this.
+set -euo pipefail
+
+AWS_REGION="${aws_region}"
+DB_PROXY_ENDPOINT="${db_proxy_endpoint}"
+DB_CREDENTIALS_SECRET_ARN="${db_credentials_secret_arn}"
+REDIS_PRIMARY_ENDPOINT="${redis_primary_endpoint}"
+REDIS_READER_ENDPOINT="${redis_reader_endpoint}"
+EFS_FILE_SYSTEM_ID="${efs_file_system_id}"
+EFS_ACCESS_POINT_ID="${efs_access_point_id}"
+MEDIA_BUCKET_NAME="${media_bucket_name}"
+
+# --- Packages ---
+dnf update -y
+dnf install -y nginx php8.2-fpm php8.2-mysqlnd php8.2-opcache php8.2-redis amazon-efs-utils jq awscli
+
+# --- Mount EFS for wp-content via the access point, over TLS ---
+mkdir -p /var/www/html/wp-content
+echo "$${EFS_FILE_SYSTEM_ID}:/ /var/www/html/wp-content efs _netdev,tls,accesspoint=$${EFS_ACCESS_POINT_ID} 0 0" >> /etc/fstab
+mount -a
+
+# --- Fetch DB credentials from Secrets Manager ---
+DB_SECRET_JSON=$(aws secretsmanager get-secret-value \
+  --region "$${AWS_REGION}" \
+  --secret-id "$${DB_CREDENTIALS_SECRET_ARN}" \
+  --query SecretString --output text)
+DB_USERNAME=$(echo "$${DB_SECRET_JSON}" | jq -r .username)
+DB_PASSWORD=$(echo "$${DB_SECRET_JSON}" | jq -r .password)
+
+# --- wp-config connection snippet ---
+# Deployed as a separate file included from wp-config.php, rather than editing
+# wp-config.php directly, so a CI/CD-deployed WordPress codebase can include this
+# without the deploy process needing to template wp-config.php itself.
+mkdir -p /var/www/html/wp-config-includes
+cat > /var/www/html/wp-config-includes/db-and-cache.php <<PHP_EOF
+<?php
+// Generated at instance boot by bootstrap.sh.tftpl. Do not edit by hand, this file is
+// overwritten on every new instance launch.
+
+define('DB_NAME', 'wordpress');
+define('DB_USER', '$${DB_USERNAME}');
+define('DB_PASSWORD', '$${DB_PASSWORD}');
+define('DB_HOST', '$${DB_PROXY_ENDPOINT}');
+
+// Redis object cache (requires a Redis object cache plugin, e.g. redis-cache, to be
+// installed in the WordPress codebase; this only supplies the connection constants).
+define('WP_REDIS_HOST', '$${REDIS_PRIMARY_ENDPOINT}');
+define('WP_REDIS_PORT', 6379);
+define('WP_REDIS_TIMEOUT', 1);
+define('WP_REDIS_READ_TIMEOUT', 1);
+define('WP_CACHE_KEY_SALT', '$${MEDIA_BUCKET_NAME}');
+
+// Externalize PHP sessions to Redis so the app tier is stateless across instances.
+ini_set('session.save_handler', 'redis');
+ini_set('session.save_path', 'tcp://$${REDIS_PRIMARY_ENDPOINT}:6379');
+
+// S3 media offload (requires an offload-media plugin in the WordPress codebase; this
+// only supplies the bucket name as a constant it can read).
+define('S3_UPLOADS_BUCKET', '$${MEDIA_BUCKET_NAME}');
+define('S3_UPLOADS_REGION', '$${AWS_REGION}');
+PHP_EOF
+
+chown -R nginx:nginx /var/www/html/wp-config-includes
+
+# --- PHP-FPM / OPcache tuning ---
+cat > /etc/php.d/99-opcache-tuning.ini <<'PHP_INI_EOF'
+opcache.enable=1
+opcache.memory_consumption=256
+opcache.max_accelerated_files=20000
+opcache.validate_timestamps=0
+; validate_timestamps=0 means OPcache will NOT pick up code changes without a PHP-FPM
+; reload. That's the correct production setting (faster), but means every deploy must
+; reload PHP-FPM, that should be a step in your CI/CD pipeline, not assumed automatic.
+PHP_INI_EOF
+
+# --- Nginx site config with FastCGI cache ---
+cat > /etc/nginx/conf.d/wordpress.conf <<'NGINX_EOF'
+fastcgi_cache_path /var/cache/nginx/wordpress levels=1:2 keys_zone=WORDPRESS:100m inactive=60m max_size=1g;
+fastcgi_cache_key "$scheme$request_method$host$request_uri";
+
+server {
+    listen 80;
+    server_name _;
+    root /var/www/html;
+    index index.php;
+
+    set $skip_cache 0;
+
+    # Never cache logged-in users, the admin area, or POST requests.
+    if ($request_method = POST) {
+        set $skip_cache 1;
+    }
+    if ($query_string != "") {
+        set $skip_cache 1;
+    }
+    if ($request_uri ~* "/wp-admin/|/xmlrpc.php|wp-.*.php|index.php") {
+        set $skip_cache 1;
+    }
+    if ($http_cookie ~* "comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_no_cache|wordpress_logged_in") {
+        set $skip_cache 1;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        fastcgi_pass unix:/run/php-fpm/www.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+
+        fastcgi_cache_bypass $skip_cache;
+        fastcgi_no_cache $skip_cache;
+        fastcgi_cache WORDPRESS;
+        fastcgi_cache_valid 200 10m;
+        add_header X-FastCGI-Cache $upstream_cache_status;
+    }
+
+    location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg|woff|woff2)$ {
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+    }
+}
+NGINX_EOF
+
+mkdir -p /var/cache/nginx/wordpress
+chown -R nginx:nginx /var/cache/nginx
+
+systemctl enable --now php8.2-fpm
+systemctl enable --now nginx
+
+# NOTE: at this point the instance has a configured web/PHP/cache stack but no actual
+# WordPress core files, themes, or plugins. That's intentionally out of scope for this
+# script, wire your own deployment step (CodeDeploy, an artifact pulled from S3/CI, or
+# a baked AMI that already contains the codebase) to populate /var/www/html after this
+# script runs, and to `include` wp-config-includes/db-and-cache.php from wp-config.php.

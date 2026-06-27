@@ -1,171 +1,181 @@
-# wp2aws
+# wordpress-high-traffic-aws
 
-**A migration-sizing tool for WordPress-to-AWS moves. Scans a real WordPress site
-(remotely, or with deeper access if run on the server itself), sizes an AWS
-architecture using the same capacity model as
-[wordpress-high-traffic-aws](https://github.com/sauharddobhal/wordpress-high-traffic-aws),
-and emits a ready-to-use `terraform.tfvars` plus a cost estimate.**
+**A production AWS architecture and Terraform implementation for a content/blog-style
+WordPress site sized for 5M+ sessions per day, built around an aggressive caching
+strategy rather than brute-force compute scaling.**
 
-This exists to replace "guess your instance sizes and hope" with a sizing decision
-grounded in either real measured traffic (server mode) or the best available external
-signal (remote mode), and to be explicit about which one you're getting.
+This is a generalized reference architecture, not tied to any real client, employer, or
+production deployment. No real domain names, account IDs, or content are included.
 
 ---
 
-## The honesty problem this tool is built around
+## Why caching is the whole story here
 
-You cannot measure a site's real traffic from outside it. There is no external,
-unauthenticated way to know how many sessions/day a WordPress site gets. Any tool that
-claims to "auto-detect your traffic" from a URL alone is guessing or fabricating a
-number. wp2aws has two modes specifically to be upfront about this distinction instead
-of papering over it:
+For a content/blog/news/marketing site (as opposed to e-commerce or membership), almost
+every page view is the same anonymous HTML for every visitor. That means the entire
+problem is "how much of this traffic can we serve from cache before it ever reaches
+WordPress," not "how many PHP-FPM workers do we need." Get the cache-hit ratio high
+enough and a surprisingly small origin fleet handles a surprisingly large amount of
+traffic. This README leads with that math because it's the actual design driver; every
+other decision in this repo follows from it.
 
-- **Remote mode** (`wp2aws scan <url>`): works against any public site, no access
-  needed, but traffic is a number *you* provide (a real input, not a discovery), because
-  there is no other honest way to get it from outside.
-- **Local mode** (`wp2aws scan --local`, run on the server itself via SSH): reads real
-  access logs, so traffic is measured, not asked for. This is the mode to use whenever
-  you actually have server access, since every other input gets more accurate too (the
-  exact plugin list, real database size, real server specs).
+## Capacity planning
 
-## What each mode actually gives you
+**Starting number:** 5,000,000 sessions/day.
 
-| Signal | Remote mode | Local mode |
-|---|---|---|
-| Traffic (sessions/day, peak ratio) | User-provided input | Measured from access logs |
-| Plugins/themes | Detected from public asset paths (misses backend-only plugins) | Exact list via WP-CLI |
-| WooCommerce / membership detection | Heuristic, from detected plugin slugs | Definitive, from full plugin list |
-| Page weight (drives the CloudFront cost line) | Measured from sampled pages (homepage + one post, HTML + linked assets via HEAD requests) | Not yet measured locally; falls back to the same default as an unconfigured remote scan |
-| Database size | Not available | Measured via WP-CLI |
-| Media library size | Not available | Measured directly |
-| Server specs (CPU/RAM/disk) | Not available | Measured directly |
-| Current cache behavior | Inferred from response headers | Inferred from response headers + config |
+Real traffic isn't flat across 24 hours. Using a 5x peak-to-average ratio (a reasonable
+planning assumption for a content site with normal diurnal traffic, adjust up if the
+audience is concentrated in one timezone, or a single article can plausibly go viral and
+spike far harder than this):
 
-### Other report features
+```
+Average requests/sec = 5,000,000 / 86,400 seconds  ≈ 58 req/s
+Peak requests/sec     = 58 × 5                      ≈ 290 req/s
+```
 
-- **Data quality score**: every report leads with how many inputs were actually measured
-  versus assumed (e.g. "4/6 inputs measured"), so the honesty distinction this tool is
-  built around is visible at a glance, not just buried in per-line basis text.
-- **Hosting cost comparison**: pass `--current-hosting-cost <monthly USD>` to see the AWS
-  estimate stacked against what you're paying now, with the difference and a percentage
-  change. This compares sticker price only, it does not account for migration engineering
-  time or capability differences (autoscaling, managed failover) your current host may
-  or may not offer.
+That 290 req/s is the number CloudFront has to absorb. The number that matters for the
+origin fleet is what's left over after caching:
+
+```
+Assume 92% CloudFront cache-hit ratio (realistic for a blog/content site with a
+sensible cache-control strategy, see "Cache invalidation" below):
+
+Origin requests/sec at peak = 290 × (1 - 0.92) ≈ 23 req/s
+```
+
+23 req/s against a PHP-FPM + Nginx origin, with OPcache and Redis object cache in
+front of the database, is comfortably handled by 2-3 mid-size instances. That's the
+entire reason this architecture doesn't need a large EC2 fleet despite the headline
+traffic number: **the cache-hit ratio is doing the heavy lifting, not horizontal compute
+scale.** If your real cache-hit ratio comes in lower than 92% (logged-in admin traffic,
+a misbehaving plugin bypassing cache, a lot of query-string variation defeating the
+cache key), the origin fleet sizing in this repo will be undersized; that ratio is the
+single most important number to monitor in production, not CPU utilization.
+
+| Metric | Value |
+|---|---|
+| Sessions/day | 5,000,000 |
+| Average req/s | ~58 |
+| Peak req/s (5x) | ~290 |
+| Assumed CDN cache-hit ratio | 92% |
+| Origin req/s at peak | ~23 |
+| Origin fleet (steady state) | 2x `t4g.medium` or `m6g.large` |
+| Origin fleet (autoscale ceiling) | 6 instances, for cache-miss storms (e.g. a post going viral before cache warms, or a cache purge during a traffic spike) |
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    A{Mode?} -->|remote| B[HTTP scan: REST API counts,<br/>asset-based plugin detection,<br/>response headers, page weight]
-    A -->|local, via SSH| C[Access log parser,<br/>WP-CLI plugin/db queries,<br/>server spec checks,<br/>safe-subset wp-config read]
-    B --> D[SiteProfile]
-    C --> D[SiteProfile]
-    D --> E[Sizing engine<br/>same capacity math as wordpress-high-traffic-aws]
-    E --> F[terraform.tfvars<br/>matches that repo's variable names]
-    E --> G[Cost estimate<br/>bundled pricing snapshot, or --live-pricing]
+    U[Visitors] --> R53[Route 53]
+    R53 --> CF[CloudFront<br/>+ Origin Shield]
+    CF -->|cache hit, ~92%| U
+    CF -->|cache miss, ~8%| WAF[AWS WAF]
+    WAF --> ALB[Application Load Balancer]
+    ALB --> ASG[Auto Scaling Group<br/>Nginx + PHP-FPM, OPcache]
+    ASG --> Redis[(ElastiCache Redis<br/>object cache + sessions)]
+    ASG --> Proxy[RDS Proxy]
+    Proxy --> Aurora[(Aurora MySQL<br/>writer + reader)]
+    ASG --> EFS[(EFS<br/>wp-content)]
+    CF --> S3[(S3<br/>media, via WP Offload Media)]
+
+    Publish[WordPress publish webhook] --> Lambda[Cache invalidation Lambda]
+    Lambda --> CF
 ```
 
 ### Components
 
-| Component | File | Role |
+| Component | Terraform module | Role |
 |---|---|---|
-| Remote scanner | `src/wp2aws/scanners/remote.py` | Public HTTP-only site scan, no credentials |
-| Local scanner | `src/wp2aws/scanners/local.py` | Access-log parsing, WP-CLI calls, server specs |
-| Secrets filter | `src/wp2aws/scanners/secrets_filter.py` | Allowlist-only wp-config.php reader; see "Safety" below |
-| Sizing engine | `src/wp2aws/sizing/engine.py` | Maps a SiteProfile to an instance/cluster sizing tier |
-| Cost estimator | `src/wp2aws/sizing/cost.py` | Monthly AWS cost estimate from the sizing decision; prefers measured page weight over the default assumption when available |
-| Data quality scorer | `src/wp2aws/sizing/quality.py` | Counts how many inputs were measured vs. assumed, surfaced at the top of every report |
-| tfvars renderer | `src/wp2aws/sizing/tfvars.py` | Emits `terraform.tfvars` matching `wordpress-high-traffic-aws`'s variable names |
-| Report renderer | `src/wp2aws/report.py` | Renders the text/Markdown report, including the data-quality line and the optional hosting-cost comparison |
+| Networking | `terraform/modules/networking` | VPC, public/private subnets across 3 AZs, NAT, route tables |
+| Compute | `terraform/modules/compute` | ALB, Auto Scaling Group, launch template, scaling policies |
+| Database | `terraform/modules/database` | Aurora MySQL cluster, reader instance, RDS Proxy |
+| Cache | `terraform/modules/cache` | ElastiCache Redis replication group (object cache + sessions) |
+| Storage | `terraform/modules/storage` | S3 media bucket, EFS filesystem and mount targets |
+| CDN | `terraform/modules/cdn` | CloudFront distribution with Origin Shield, cache behaviors |
+| Security | `terraform/modules/security` | WAF web ACL with WordPress-tuned managed rule groups, security groups |
+| Cache invalidation | `scripts/cache-invalidation-lambda` | Lambda triggered by a WordPress publish webhook via a Function URL, invalidates the specific CloudFront path instead of the whole distribution, captures failures to SQS (see "Failure handling" below) |
 
-## Safety
+## Cache invalidation strategy
 
-- **Remote mode is read-only and respects `robots.txt`.** It checks `robots.txt` before
-  making any request beyond that, identifies itself with a clear User-Agent
-  (`wp2aws-scanner/<version>`), and only ever issues GET and HEAD requests (HEAD is used
-  to measure linked asset sizes for the page-weight estimate without downloading their
-  bodies). Only scan sites you own or have explicit permission to scan.
-- **Local mode never reads or outputs secrets.** `wp-config.php` parsing uses a strict
-  allowlist of constant names (`WP_CACHE`, `WP_DEBUG`, `DISABLE_WP_CRON`,
-  `WP_MEMORY_LIMIT`, `WP_MAX_MEMORY_LIMIT`). `DB_PASSWORD`, `DB_USER`, all auth
-  keys/salts, and anything not on that allowlist are never extracted, full stop, not
-  filtered after the fact. See `src/wp2aws/scanners/secrets_filter.py`.
-- **WP-CLI and log access run with whatever permissions your shell session already
-  has.** This tool does not escalate privileges or modify anything on the server; every
-  operation it performs is a read.
+The hard part of aggressive HTML caching is staleness: how does a published edit show
+up quickly if CloudFront is holding a page for 10 minutes? Two complementary
+mechanisms:
+
+1. **Short-ish default TTL** (5-10 minutes) on HTML, so worst case staleness is bounded
+   even if nothing else fires.
+2. **Targeted invalidation on publish.** A WordPress webhook (`save_post` hook) calls
+   the Lambda Function URL backed by `scripts/cache-invalidation-lambda`, which
+   invalidates just the changed path(s) in CloudFront immediately, rather than
+   purging the whole distribution (which would cause a cache-miss storm against the
+   origin right after every single edit).
+
+### Failure handling on a synchronously-invoked Lambda
+
+This Lambda is invoked via a Function URL, which uses synchronous (`RequestResponse`)
+invocation, not the asynchronous invocation that EventBridge or SNS use. That
+distinction matters: Lambda's automatic async failure handling (Destinations, the
+built-in DLQ config) only fires for asynchronous invocations. Wiring up an async DLQ on
+a Function-URL-triggered Lambda the way you would for an EventBridge-triggered one
+would be configured in Terraform but would never actually fire, a non-functional safety
+feature that looks correct on paper. Instead, the handler itself catches a CloudFront
+API failure and pushes it to an SQS queue before returning the error response (see
+`handler.py`), and an optional CloudWatch alarm on the function's error rate notifies
+on failures via `var.alert_email`.
 
 ## What's a realistic pattern vs. what's simplified for this portfolio
 
 **Realistic / representative of real production patterns:**
-- The remote/local distinction and being explicit about which inputs are measured
-  versus assumed is the actual right way to think about sizing, not a simplification.
-- Routing the sizing math through the same capacity model as `wordpress-high-traffic-aws`
-  (peak-to-average ratio, cache-hit-ratio-driven origin load) means the two repos tell a
-  consistent, honest story rather than two unrelated approaches to the same problem.
-- The allowlist-only approach to reading `wp-config.php` (rather than reading everything
-  and trying to redact secrets afterward) is the safer pattern; redaction-after-the-fact
-  is the kind of thing that quietly fails when a new secret-like constant gets added
-  later and nobody updates the redaction list.
+- Leading the design with cache-hit ratio rather than compute capacity is exactly how a
+  content-heavy WordPress site at this traffic level is actually architected; this
+  isn't a simplification, it's the correct approach.
+- Targeted cache invalidation on publish, instead of full-distribution purges, is a real
+  and important operational detail, not a nice-to-have.
+- Externalizing PHP sessions and object cache to Redis, so the app tier is genuinely
+  stateless, is what makes the Auto Scaling Group actually safe to scale in and out.
+- Matching the failure-handling mechanism to the actual invocation type (explicit SQS
+  capture inside the handler for the synchronously-invoked Function URL Lambda, rather
+  than an async Destinations/DLQ config that would silently never fire for this trigger
+  type) is the kind of detail that's easy to get wrong by copying a pattern from a
+  different trigger type without checking whether it actually applies.
 
 **Simplified for portfolio purposes:**
-- The cost estimate uses a bundled, dated pricing snapshot (`data/pricing_snapshot.json`)
-  by default, so the tool runs offline with zero AWS credentials. Pass `--live-pricing`
-  to fetch current prices from AWS's public Bulk Pricing API instead (no AWS credentials
-  needed for that either, just outbound internet access). The bundled snapshot WILL
-  drift from real pricing over time; treat default-mode estimates as directional, not a
-  quote.
-- This tool produces a starting `terraform.tfvars`, not a finished migration. DNS
-  cutover, database export/import, and media sync to S3 are real steps it does not
-  automate.
-- Remote-mode plugin detection is asset-path heuristics and will miss backend-only
-  plugins (anything that doesn't enqueue a front-end script or stylesheet). Local mode's
-  WP-CLI-based detection doesn't have this limitation.
+- The 92% cache-hit ratio and 5x peak factor are reasonable planning assumptions, not
+  measurements from a real site. Real cache-hit ratio depends heavily on the specific
+  theme, plugins, and how much query-string/cookie variation exists in requests; this
+  should be measured and tuned against real traffic, not trusted at the planning number.
+- This architecture assumes mostly-anonymous, mostly-cacheable traffic (content, blog,
+  news, marketing). It is explicitly not sized or designed for WooCommerce, memberships,
+  or other heavily personalized/logged-in traffic; that's a meaningfully different
+  architecture (cart/session persistence, payment compliance, far lower cache-hit
+  ceiling) and would need its own design.
+- The `environments/example` root module uses placeholder values throughout (no real
+  domain, no real account ID, no real ACM certificate ARN); these are meant to be
+  replaced, not used as-is.
+- The bootstrap script (`scripts/bootstrap.sh`) installs and configures the stack but
+  does not include an actual WordPress codebase or theme; in a real deployment that
+  would come from your own CodeDeploy/CI pipeline or a baked AMI.
 
-## Setup
+## Tech stack
+
+`Terraform >= 1.5` · `Amazon CloudFront` · `AWS WAF` · `Application Load Balancer` ·
+`EC2 Auto Scaling` · `Aurora MySQL` · `RDS Proxy` · `Amazon ElastiCache (Redis)` ·
+`Amazon S3` · `Amazon EFS` · `AWS Lambda` · `Nginx` · `PHP-FPM`
+
+## Usage
 
 ```bash
-git clone https://github.com/sauharddobhal/wp2aws.git
-cd wp2aws
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+cd terraform/environments/example
+cp terraform.tfvars.example terraform.tfvars   # fill in your own domain, ACM ARN, etc.
+cp backend.tf.example backend.tf               # point at your own state backend
+terraform init
+terraform plan
 ```
 
-### Demo (zero network calls, zero setup)
+### Validating without AWS credentials
 
 ```bash
-python -m wp2aws demo
-```
-
-Runs the full pipeline against a bundled synthetic site profile so you can see the
-sizing engine, cost estimate, and tfvars output without scanning anything real.
-
-### Remote scan
-
-```bash
-python -m wp2aws scan https://example.com --sessions-per-day 50000
-```
-
-### Local scan (run this ON the WordPress server, e.g. over SSH)
-
-```bash
-python -m wp2aws scan --local --access-log /var/log/nginx/access.log
-```
-
-### Exporting the sizing result
-
-```bash
-python -m wp2aws scan https://example.com --sessions-per-day 50000 \
-  --export-tfvars terraform.tfvars --export-report report.md \
-  --current-hosting-cost 200
-```
-
-`terraform.tfvars` can be copied directly into
-`wordpress-high-traffic-aws/terraform/environments/example/`.
-
-### Running tests
-
-```bash
-pytest tests/
+terraform fmt -check -recursive
+terraform validate   # requires `terraform init` to have completed
 ```
 
 ## License

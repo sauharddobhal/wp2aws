@@ -1,0 +1,4 @@
+# boto3 is included in the AWS Lambda Python runtime by default, no need to package it.
+# Listed here only for local development/testing.
+boto3>=1.34.0
+pytest>=8.0.0
